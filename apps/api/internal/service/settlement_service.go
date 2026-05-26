@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/suncrestlabs/nester/apps/api/internal/domain/bankaccount"
 	"github.com/suncrestlabs/nester/apps/api/internal/domain/offramp"
 )
 
@@ -17,24 +19,31 @@ var (
 	rebankCode = regexp.MustCompile(`^\d{3,9}$`)
 )
 
-type SettlementService struct {
-	repository offramp.Repository
+// SavedBankAccountResolver loads decrypted bank details for settlement.
+type SavedBankAccountResolver interface {
+	ResolveForSettlement(ctx context.Context, userID, accountID uuid.UUID) (bankaccount.BankAccount, error)
 }
 
-func NewSettlementService(repository offramp.Repository) *SettlementService {
-	return &SettlementService{repository: repository}
+type SettlementService struct {
+	repository   offramp.Repository
+	bankAccounts SavedBankAccountResolver
+}
+
+func NewSettlementService(repository offramp.Repository, bankAccounts SavedBankAccountResolver) *SettlementService {
+	return &SettlementService{repository: repository, bankAccounts: bankAccounts}
 }
 
 // InitiateSettlementInput carries caller-supplied data for a new settlement.
 type InitiateSettlementInput struct {
-	UserID       uuid.UUID
-	VaultID      uuid.UUID
-	Amount       decimal.Decimal
-	Currency     string
-	FiatCurrency string
-	FiatAmount   decimal.Decimal
-	ExchangeRate decimal.Decimal
-	Destination  offramp.Destination
+	UserID        uuid.UUID
+	VaultID       uuid.UUID
+	Amount        decimal.Decimal
+	Currency      string
+	FiatCurrency  string
+	FiatAmount    decimal.Decimal
+	ExchangeRate  decimal.Decimal
+	BankAccountID *uuid.UUID
+	Destination   offramp.Destination
 }
 
 // UpdateStatusInput carries the target state for a status transition.
@@ -71,6 +80,26 @@ func (s *SettlementService) InitiateSettlement(ctx context.Context, input Initia
 
 	if strings.TrimSpace(input.Currency) == "" || strings.TrimSpace(input.FiatCurrency) == "" {
 		return offramp.Settlement{}, offramp.ErrInvalidSettlement
+	}
+
+	if input.BankAccountID != nil {
+		if s.bankAccounts == nil {
+			return offramp.Settlement{}, offramp.ErrInvalidSettlement
+		}
+		saved, err := s.bankAccounts.ResolveForSettlement(ctx, input.UserID, *input.BankAccountID)
+		if err != nil {
+			return offramp.Settlement{}, mapBankAccountSettlementError(err)
+		}
+		input.Destination = offramp.Destination{
+			Type:          "bank_transfer",
+			Provider:      "bank",
+			AccountNumber: saved.AccountNumber,
+			AccountName:   saved.AccountName,
+			BankCode:      saved.BankCode,
+		}
+		if strings.TrimSpace(input.FiatCurrency) == "" {
+			input.FiatCurrency = saved.Currency
+		}
 	}
 
 	if err := validateDestination(input.Destination); err != nil {
@@ -176,4 +205,15 @@ func validateDestination(d offramp.Destination) error {
 		}
 	}
 	return nil
+}
+
+func mapBankAccountSettlementError(err error) error {
+	switch {
+	case errors.Is(err, bankaccount.ErrNotFound):
+		return offramp.ErrInvalidSettlement
+	case errors.Is(err, bankaccount.ErrForbidden):
+		return offramp.ErrForbidden
+	default:
+		return err
+	}
 }

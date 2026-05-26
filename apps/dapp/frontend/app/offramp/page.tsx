@@ -32,7 +32,13 @@ import { getExplorerTxUrl } from "@/utils/explorer";
 import { BankCombobox } from "@/components/offramp/BankCombobox";
 import { AccountNameField } from "@/components/offramp/AccountNameField";
 import { SuggestedBankChips } from "@/components/offramp/SuggestedBankChips";
+import {
+    SavedBankAccountPicker,
+    type PayoutMode,
+} from "@/components/offramp/SavedBankAccountPicker";
+import { SaveAccountPrompt } from "@/components/offramp/SaveAccountPrompt";
 import { useBankResolver } from "@/hooks/useBankResolver";
+import { fetchBankList } from "@/lib/api/bank";
 
 const SEND_ASSETS = [
     { symbol: "USDC", name: "USD Coin", image: "/usdc.png" },
@@ -141,6 +147,14 @@ export default function OfframpPage() {
     const [sendAsset, setSendAsset] = useState(SEND_ASSETS[0]);
     const [receiveCurrency, setReceiveCurrency] = useState(RECEIVE_CURRENCIES[0]);
     const [manualName, setManualName] = useState("");
+    const [payoutMode, setPayoutMode] = useState<PayoutMode>({ type: "manual" });
+    const [savePromptOpen, setSavePromptOpen] = useState(false);
+    const [lastManualPayout, setLastManualPayout] = useState<{
+        bankName: string;
+        bankCode: string;
+        accountNumber: string;
+        accountName: string;
+    } | null>(null);
 
     const { resolveState, accountInfo } = useBankResolver(accountNumber, selectedBankCode);
     const resolvedName = resolveState === "success" ? (accountInfo?.account_name ?? null) : null;
@@ -162,7 +176,14 @@ export default function OfframpPage() {
     }, [isConnected, router]);
 
     const numericAmount = parseFloat(sendAmount) || 0;
-    const allFieldsFilled = isValid;
+    const effectiveBankCode =
+        payoutMode.type === "saved"
+            ? payoutMode.account.bank_code ?? ""
+            : selectedBankCode;
+    const allFieldsFilled =
+        payoutMode.type === "saved"
+            ? numericAmount > 0 && Boolean(effectiveBankCode)
+            : isValid;
 
     const runQuoteScan = useCallback(
         (amount: number, bankCode: string, currency: typeof RECEIVE_CURRENCIES[0]) => {
@@ -221,10 +242,10 @@ export default function OfframpPage() {
 
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
-            runQuoteScan(numericAmount, selectedBankCode, receiveCurrency);
+            runQuoteScan(numericAmount, effectiveBankCode, receiveCurrency);
 
             refreshRef.current = setInterval(() => {
-                silentRefresh(numericAmount, selectedBankCode, receiveCurrency);
+                silentRefresh(numericAmount, effectiveBankCode, receiveCurrency);
             }, 8000);
         }, 500);
 
@@ -232,7 +253,7 @@ export default function OfframpPage() {
             if (debounceRef.current) clearTimeout(debounceRef.current);
             if (refreshRef.current) clearInterval(refreshRef.current);
         };
-    }, [allFieldsFilled, numericAmount, selectedBankCode, receiveCurrency, runQuoteScan, silentRefresh]);
+    }, [allFieldsFilled, numericAmount, effectiveBankCode, receiveCurrency, runQuoteScan, silentRefresh]);
 
     if (!isConnected) return null;
 
@@ -243,7 +264,11 @@ export default function OfframpPage() {
             : 0;
 
     const handleWithdraw = handleSubmit((data) => {
-        if (!isValid || quotePhase !== "done" || !selectedQuote) {
+        const canSubmit =
+            payoutMode.type === "saved"
+                ? numericAmount > 0 && quotePhase === "done" && selectedQuote
+                : isValid && quotePhase === "done" && selectedQuote;
+        if (!canSubmit) {
             return;
         }
 
@@ -253,6 +278,20 @@ export default function OfframpPage() {
         }
 
         setShowLargeWarning(false);
+
+        if (payoutMode.type === "manual" && resolvedName) {
+            void fetchBankList("NG").then((banks) => {
+                const bank = banks.find((b) => b.code === data.bankCode);
+                setLastManualPayout({
+                    bankName: bank?.name ?? data.bankCode,
+                    bankCode: data.bankCode,
+                    accountNumber: data.accountNumber,
+                    accountName: resolvedName,
+                });
+                setSavePromptOpen(true);
+            });
+        }
+
         addNotification(
             {
                 type: "withdrawal_processed",
@@ -468,6 +507,34 @@ export default function OfframpPage() {
 
                     {/* Bank Details Section */}
                     <div className="border-t border-border p-4 sm:p-5 space-y-4">
+                        <SavedBankAccountPicker
+                            currency={receiveCurrency.symbol}
+                            value={payoutMode}
+                            onChange={setPayoutMode}
+                        />
+
+                        {savePromptOpen && lastManualPayout && (
+                            <SaveAccountPrompt
+                                {...lastManualPayout}
+                                currency={receiveCurrency.symbol}
+                                country="NG"
+                                onDismiss={() => setSavePromptOpen(false)}
+                                onSaved={() => setSavePromptOpen(false)}
+                            />
+                        )}
+
+                        {payoutMode.type === "saved" ? (
+                            <div className="rounded-xl border border-border bg-secondary/20 px-4 py-3 text-sm">
+                                <p className="font-medium text-foreground">
+                                    {payoutMode.account.bank_name}
+                                </p>
+                                <p className="text-muted-foreground text-xs mt-1">
+                                    {payoutMode.account.account_name} · ••••
+                                    {payoutMode.account.account_last4}
+                                </p>
+                            </div>
+                        ) : (
+                        <>
                         {/* Step 1 — Account number */}
                         <div>
                             <label className="text-xs text-muted-foreground font-medium mb-2 block">
@@ -569,6 +636,8 @@ export default function OfframpPage() {
                             onManualName={setManualName}
                             manualName={manualName}
                         />
+                        </>
+                        )}
                     </div>
 
                     {/* Rate info */}

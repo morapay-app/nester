@@ -22,6 +22,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/suncrestlabs/nester/apps/api/internal/auth"
+	cryptopkg "github.com/suncrestlabs/nester/apps/api/internal/crypto"
 	"github.com/suncrestlabs/nester/apps/api/internal/config"
 	dbpkg "github.com/suncrestlabs/nester/apps/api/internal/db"
 	"github.com/suncrestlabs/nester/apps/api/internal/handler"
@@ -89,8 +90,26 @@ func run() error {
 	transactionService := service.NewTransactionService(transactionRepository, cfg.Stellar().HorizonURL())
 	transactionHandler := handler.NewTransactionHandler(transactionService)
 
+	bankAccountRepository := postgres.NewBankAccountRepository(db)
+	var accountCipher *cryptopkg.AccountCipher
+	if key := cfg.BankAccountEncryptionKey(); key != "" {
+		cipher, cipherErr := cryptopkg.NewAccountCipher(key)
+		if cipherErr != nil {
+			return fmt.Errorf("bank account cipher: %w", cipherErr)
+		}
+		accountCipher = cipher
+	}
+
+	paystackResolver := service.NewPaystackResolver(cfg.Bank().PaystackKey())
+	flutterwaveResolver := service.NewFlutterwaveResolver(cfg.Bank().FlutterwaveKey())
+	bankService := service.NewBankService(paystackResolver, flutterwaveResolver)
+	bankHandler := handler.NewBankHandler(bankService)
+
+	bankAccountService := service.NewBankAccountService(bankAccountRepository, accountCipher, bankService)
+	bankAccountHandler := handler.NewBankAccountHandler(bankAccountService)
+
 	settlementRepository := postgres.NewSettlementRepository(db)
-	settlementService := service.NewSettlementService(settlementRepository)
+	settlementService := service.NewSettlementService(settlementRepository, bankAccountService)
 	settlementHandler := handler.NewSettlementHandler(settlementService)
 
 	userRepository := postgres.NewUserRepository(db)
@@ -181,11 +200,6 @@ func run() error {
 
 	depHTTPClient := &http.Client{Timeout: cfg.Startup().DependencyTimeout()}
 
-	paystackResolver := service.NewPaystackResolver(cfg.Bank().PaystackKey())
-	flutterwaveResolver := service.NewFlutterwaveResolver(cfg.Bank().FlutterwaveKey())
-	bankService := service.NewBankService(paystackResolver, flutterwaveResolver)
-	bankHandler := handler.NewBankHandler(bankService)
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", livenessHandler(&ready))
 	mux.HandleFunc("GET /healthz", livenessHandler(&ready))
@@ -210,6 +224,7 @@ func run() error {
 	rateHandler.Register(mux)
 	performanceHandler.Register(mux)
 	bankHandler.Register(mux)
+	bankAccountHandler.Register(mux)
 
 	mux.HandleFunc("GET /ws", wsHub.ServeWs)
 

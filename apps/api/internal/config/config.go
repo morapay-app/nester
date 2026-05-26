@@ -27,6 +27,7 @@ type Config struct {
 	performance           PerformanceConfig
 	startup               StartupConfig
 	bank                  BankConfig
+	bankAccountCipherKey  string
 }
 
 // StartupConfig governs one-shot work performed before the server begins
@@ -167,6 +168,11 @@ func Load() (*Config, error) {
 			paystackKey:    loader.stringDefault("PAYSTACK_SECRET_KEY", ""),
 			flutterwaveKey: loader.stringDefault("FLUTTERWAVE_SECRET_KEY", ""),
 		},
+		bankAccountCipherKey: loader.stringDefault("BANK_ACCOUNT_ENCRYPTION_KEY", ""),
+	}
+
+	if cfg.bankAccountCipherKey == "" && environment == "development" {
+		cfg.bankAccountCipherKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 	}
 
 	cfg.validate(&loader)
@@ -252,6 +258,10 @@ func (r RedisConfig) Addr() string {
 
 func (c Config) Bank() BankConfig {
 	return c.bank
+}
+
+func (c Config) BankAccountEncryptionKey() string {
+	return c.bankAccountCipherKey
 }
 
 func (b BankConfig) PaystackKey() string {
